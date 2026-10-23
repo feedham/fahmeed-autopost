@@ -1,0 +1,37 @@
+name: Daily Facebook good-morning posts
+
+on:
+  schedule:
+    # 03:30 UTC = 08:30 Pakistan time. The script then waits until exactly 09:00.
+    # (GitHub sometimes starts scheduled jobs a few minutes late, hence the head start.)
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Only show what would be posted (true/false)"
+        default: "true"
+      day:
+        description: "Day number 1-30 to post (blank = today's)"
+        default: ""
+      no_wait:
+        description: "Post immediately instead of waiting for 09:00 (true/false)"
+        default: "true"
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - name: Post today's images
+        env:
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          FORCE_DAY: ${{ github.event.inputs.day || '' }}
+          NO_WAIT: ${{ github.event.inputs.no_wait || 'false' }}
+        run: python post.py
