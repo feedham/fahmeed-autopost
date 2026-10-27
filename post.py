@@ -1,4 +1,4 @@
-"""Post today's good-morning image to a Facebook Page.
+"""Post today's good-morning image to a Facebook Page and its Instagram account.
 
 Runs from GitHub Actions every morning. Reads schedule.json, works out which
 of the 30 days it is (repeating after day 30), waits until the post time
@@ -6,7 +6,10 @@ of the 30 days it is (repeating after day 30), waits until the post time
 
 Environment variables (set as GitHub secrets):
   FB_PAGE_ID     numeric ID of the Facebook Page
-  FB_PAGE_TOKEN  Page access token with pages_manage_posts permission
+  FB_PAGE_TOKEN  Page access token with pages_manage_posts, instagram_basic,
+                 instagram_content_publish permissions
+  IG_USER_ID     Instagram professional account ID linked to the Page
+                 (optional - leave unset to post on Facebook only)
 Optional:
   GRAPH_VERSION  Graph API version, default v26.0
   DRY_RUN        "true" to only print what would be posted
@@ -15,6 +18,7 @@ Optional:
 """
 import json, os, sys, time
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 import requests
 
@@ -44,11 +48,38 @@ if not dry and os.getenv("NO_WAIT", "").lower() != "true" and timedelta(0) < tar
     print(f"Waiting {wait / 60:.1f} min until {cfg['post_time']}…"); sys.stdout.flush()
     time.sleep(wait)
 
-page_id = os.getenv("FB_PAGE_ID", "")
-token = os.getenv("FB_PAGE_TOKEN", "")
+page_id = os.getenv("FB_PAGE_ID", "").strip()
+token = os.getenv("FB_PAGE_TOKEN", "").strip()
+ig_id = os.getenv("IG_USER_ID", "").strip()
 version = os.getenv("GRAPH_VERSION", "v26.0")
+graph = f"https://graph.facebook.com/{version}"
+repo = os.getenv("GITHUB_REPOSITORY", "feedham/fahmeed-autopost")
+branch = os.getenv("GITHUB_REF_NAME", "main")
 if not dry and not (page_id and token):
-    sys.exit("FB_PAGE_ID and FB_PAGE_TOKEN secrets are missing.")
+    sys.exit("FB_PAGE_ID and FB_PAGE_TOKEN secrets are missing. "
+             "Add them in Settings > Secrets and variables > Actions.")
+
+
+def post_instagram(image_rel, caption):
+    """Instagram needs a public image URL; the repo is public, so use the raw GitHub link."""
+    url = f"https://raw.githubusercontent.com/{repo}/{branch}/{quote(image_rel)}"
+    r = requests.post(f"{graph}/{ig_id}/media",
+                      data={"image_url": url, "caption": caption, "access_token": token}, timeout=120)
+    if not r.ok:
+        return False, r.text
+    cid = r.json()["id"]
+    for _ in range(24):  # wait up to 2 minutes for Instagram to process the image
+        s = requests.get(f"{graph}/{cid}", params={"fields": "status_code", "access_token": token}, timeout=60)
+        status = s.json().get("status_code")
+        if status == "FINISHED":
+            break
+        if status == "ERROR":
+            return False, s.text
+        time.sleep(5)
+    r = requests.post(f"{graph}/{ig_id}/media_publish",
+                      data={"creation_id": cid, "access_token": token}, timeout=120)
+    return r.ok, r.text
+
 
 failed = 0
 for n, post in enumerate(posts):
@@ -58,16 +89,20 @@ for n, post in enumerate(posts):
         continue
     with open(path, "rb") as fh:
         r = requests.post(
-            f"https://graph.facebook.com/{version}/{page_id}/photos",
+            f"{graph}/{page_id}/photos",
             data={"message": post["caption"], "published": "true", "access_token": token},
             files={"source": (os.path.basename(path), fh, "image/jpeg")},
             timeout=120,
         )
     if r.ok:
-        print("Posted:", r.json())
+        print("Facebook posted:", r.json())
     else:
         failed += 1
-        print("FAILED:", r.status_code, r.text)
+        print("Facebook FAILED:", r.status_code, r.text)
+    if ig_id:
+        ok, info = post_instagram(post["image"], post["caption"])
+        print("Instagram posted:" if ok else "Instagram FAILED:", info)
+        failed += 0 if ok else 1
     if n < len(posts) - 1:
         time.sleep(cfg.get("seconds_between_posts", 20))
 
